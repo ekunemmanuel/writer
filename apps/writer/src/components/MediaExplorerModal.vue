@@ -4,7 +4,7 @@ import { api } from '@convex/_generated/api'
 import { X, Trash2, Loader2, Image as ImageIcon, Plus } from '@lucide/vue'
 import { ref } from 'vue'
 
-const props = defineProps<{
+defineProps<{
   isOpen: boolean
 }>()
 

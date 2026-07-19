@@ -20,7 +20,9 @@ export function useQuery<Query extends FunctionReference<"query">>(
 
   watchEffect((onCleanup) => {
     if (!convex) {
-      console.warn("useQuery called before initConvex");
+      if (typeof window !== 'undefined') {
+        console.warn("useQuery called before initConvex");
+      }
       return;
     }
 
