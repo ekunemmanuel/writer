@@ -1,0 +1,21 @@
+{
+  "name": "writer-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:writer": "bun --cwd apps/writer tauri dev",
+    "dev:web": "bun --cwd apps/web dev",
+    "dev:convex": "convex dev"
+  },
+  "dependencies": {
+    "@auth/core": "^0.41.2",
+    "@convex-dev/auth": "^0.0.94",
+    "@nuxt/ui": "^4.10.0",
+    "convex": "^1.42.3",
+    "tailwindcss": "^4.3.3"
+  }
+}

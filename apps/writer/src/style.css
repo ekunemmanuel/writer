@@ -1,0 +1,89 @@
+@import "tailwindcss";
+
+@theme {
+  /* Rich Color Palette */
+  --color-primary-50: #eef2ff;
+  --color-primary-100: #e0e7ff;
+  --color-primary-200: #c7d2fe;
+  --color-primary-300: #a5b4fc;
+  --color-primary-400: #818cf8;
+  --color-primary-500: #6366f1; /* Indigo 500 */
+  --color-primary-600: #4f46e5;
+  --color-primary-700: #4338ca;
+  --color-primary-800: #3730a3;
+  --color-primary-900: #312e81;
+  --color-primary-950: #1e1b4b;
+
+  --color-secondary-400: #f472b6; /* Pink 400 */
+  --color-secondary-500: #ec4899;
+  --color-secondary-600: #db2777;
+
+  --color-surface-50: #fafafa;
+  --color-surface-100: #f4f4f5;
+  --color-surface-200: #e4e4e7;
+  --color-surface-300: #d4d4d8;
+  --color-surface-400: #a1a1aa;
+  --color-surface-500: #71717a;
+  --color-surface-600: #52525b;
+  --color-surface-700: #3f3f46;
+  --color-surface-800: #27272a;
+  --color-surface-900: #18181b;
+  --color-surface-950: #09090b;
+
+  /* Typography */
+  --font-sans: "Inter", "Outfit", system-ui, -apple-system, sans-serif;
+  --font-display: "Outfit", "Inter", system-ui, sans-serif;
+
+  /* Spacing & Radii */
+  --radius-btn: 0.75rem;
+  --radius-card: 1.5rem;
+
+  /* Premium Shadows */
+  --shadow-glass: 0 8px 32px 0 rgba(31, 38, 135, 0.07);
+  --shadow-glass-dark: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+  --shadow-glow: 0 0 20px rgba(99, 102, 241, 0.4);
+}
+
+@layer base {
+  :root {
+    --bg-color: var(--color-surface-50);
+    --text-color: var(--color-surface-950);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg-color: var(--color-surface-950);
+      --text-color: var(--color-surface-50);
+    }
+  }
+
+  body {
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    font-family: var(--font-sans);
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-white/60 backdrop-blur-xl border border-white/40 shadow-glass rounded-(--radius-card);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .glass-panel {
+      @apply bg-surface-900/40 border-surface-800/50 shadow-glass-dark;
+    }
+  }
+
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-linear-to-r from-primary-500 to-secondary-500;
+  }
+
+  .btn-primary {
+    @apply relative overflow-hidden rounded-(--radius-btn) bg-primary-600 px-6 py-3 font-medium text-white shadow-glow transition-all hover:bg-primary-500 hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0;
+  }
+
+  .btn-secondary {
+    @apply relative overflow-hidden rounded-(--radius-btn) bg-surface-100 px-6 py-3 font-medium text-surface-900 transition-all hover:bg-surface-200 hover:-translate-y-0.5 active:translate-y-0 dark:bg-surface-800 dark:text-surface-50 dark:hover:bg-surface-700;
+  }
+}
