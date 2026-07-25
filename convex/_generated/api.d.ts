@@ -9,9 +9,11 @@
  */
 
 import type * as auth from "../auth.js";
+import type * as crons from "../crons.js";
 import type * as documents from "../documents.js";
 import type * as http from "../http.js";
 import type * as images from "../images.js";
+import type * as permissions from "../permissions.js";
 import type * as storage from "../storage.js";
 
 import type {
@@ -22,9 +24,11 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
+  crons: typeof crons;
   documents: typeof documents;
   http: typeof http;
   images: typeof images;
+  permissions: typeof permissions;
   storage: typeof storage;
 }>;
 
@@ -54,4 +58,6 @@ export declare const internal: FilterApi<
   FunctionReference<any, "internal">
 >;
 
-export declare const components: {};
+export declare const components: {
+  permissions: import("@vllnt/convex-permissions/_generated/component.js").ComponentApi<"permissions">;
+};

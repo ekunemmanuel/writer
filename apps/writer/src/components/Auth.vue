@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { useAuth } from '@writer/shared';
+import { useAuth, parseConvexError } from '@writer/shared';
 
 const { signIn, isLoading } = useAuth();
 
@@ -18,8 +18,8 @@ const handleSubmit = async () => {
   
   try {
     await signIn(email.value, password.value, isSignUp.value);
-  } catch (err: any) {
-    errorMsg.value = err.message || 'An error occurred during sign in.';
+  } catch (err: unknown) {
+    errorMsg.value = parseConvexError(err, 'An error occurred during sign in.');
   }
 };
 </script>

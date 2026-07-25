@@ -1,6 +1,7 @@
 import { ConvexClient } from "convex/browser";
 import { ref, watchEffect, unref, type Ref } from "vue";
 import type { FunctionReference, FunctionArgs, FunctionReturnType } from "convex/server";
+import { ConvexError } from "convex/values";
 
 export let convex: ConvexClient;
 
@@ -75,4 +76,36 @@ export function useAction<Action extends FunctionReference<"action">>(
     if (!convex) throw new Error("useAction called before initConvex");
     return await convex.action(action, args);
   };
+}
+
+
+/**
+ * Extracts a user-facing error string from a Convex call.
+ * Priority: ConvexError.data -> ConvexError.message / Error.message -> default fallback error message.
+ */
+export function parseConvexError(
+  err: unknown,
+  defaultMsg: string = "An unexpected error occurred."
+): string {
+  if (err instanceof ConvexError) {
+    if (typeof err.data === "string" && err.data.trim().length > 0) {
+      return err.data;
+    }
+    if (
+      err.data &&
+      typeof err.data === "object" &&
+      "message" in err.data &&
+      typeof (err.data as { message?: unknown }).message === "string" &&
+      (err.data as { message: string }).message.trim().length > 0
+    ) {
+      return (err.data as { message: string }).message;
+    }
+    if (err.message && err.message.trim().length > 0) {
+      return err.message;
+    }
+  }
+  if (err instanceof Error && err.message && err.message.trim().length > 0) {
+    return err.message;
+  }
+  return defaultMsg;
 }

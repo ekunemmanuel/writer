@@ -1,5 +1,5 @@
 import { mutation, query } from "./_generated/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { requireAuth } from "./auth";
 
 export const list = query({
@@ -35,8 +35,8 @@ export const remove = mutation({
     const userId = await requireAuth(ctx);
 
     const image = await ctx.db.get(args.id);
-    if (!image) throw new Error("Image not found");
-    if (image.userId && image.userId !== userId) throw new Error("Unauthorized");
+    if (!image) throw new ConvexError("Image not found");
+    if (image.userId && image.userId !== userId) throw new ConvexError("Unauthorized");
 
     // Check if any document is currently using this image
     const documents = await ctx.db.query("documents").filter((q) => q.eq(q.field("userId"), userId)).collect();
@@ -44,7 +44,7 @@ export const remove = mutation({
 
     if (documentsUsingImage.length > 0) {
       const docNames = documentsUsingImage.map(doc => doc.title || "Untitled Document").join(", ");
-      throw new Error(`Cannot delete image. It is currently being used in the following documents: ${docNames}`);
+      throw new ConvexError(`Cannot delete image. It is currently being used in the following documents: ${docNames}`);
     }
 
     // Delete the file from storage

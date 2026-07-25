@@ -9,12 +9,16 @@
   "scripts": {
     "dev:writer": "bun --cwd apps/writer tauri dev",
     "dev:web": "bun --cwd apps/web dev",
-    "dev:convex": "convex dev"
+    "dev:convex": "convex dev",
+    "build:writer": "bun --cwd apps/writer tauri build",
+    "build:web": "bun --cwd apps/web build",
+    "build:all": "bun run build:writer && bun run build:web"
   },
   "dependencies": {
     "@auth/core": "^0.41.2",
     "@convex-dev/auth": "^0.0.94",
     "@nuxt/ui": "^4.10.0",
+    "@vllnt/convex-permissions": "^0.1.0-canary.1236fb6",
     "convex": "^1.42.3",
     "tailwindcss": "^4.3.3"
   }

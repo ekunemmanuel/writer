@@ -5,18 +5,11 @@ import { api } from '@convex/_generated/api';
 
 export let authClient: ConvexHttpClient;
 
-export function initAuth(url: string) {
-  if (!authClient) {
-    authClient = new ConvexHttpClient(url);
-  }
-}
-
 const CONVEX_AUTH_JWT_KEY = '__convexAuthJWT';
 const CONVEX_AUTH_REFRESH_KEY = '__convexAuthRefreshToken';
 
 const isLoading = ref(true);
 const accessToken = ref<string | null>(null);
-export const isAuthenticated = computed(() => !!accessToken.value);
 
 function isTokenExpired(token: string | null) {
   if (!token) return true;
@@ -40,15 +33,17 @@ function isTokenExpired(token: string | null) {
   }
 }
 
+export const isAuthenticated = computed(() => !!accessToken.value && !isTokenExpired(accessToken.value));
+
 async function setTokens(token: string | null, newRefreshToken: string | null) {
-  if (token) {
+  if (token && !isTokenExpired(token)) {
     localStorage.setItem(CONVEX_AUTH_JWT_KEY, token);
     accessToken.value = token;
-    convex.setAuth(fetchAccessToken);
+    if (convex) convex.setAuth(fetchAccessToken);
   } else {
     localStorage.removeItem(CONVEX_AUTH_JWT_KEY);
     accessToken.value = null;
-    convex.setAuth(async () => null);
+    if (convex) convex.setAuth(async () => null);
   }
 
   if (newRefreshToken) {
@@ -64,45 +59,80 @@ export async function fetchAccessToken() {
   let token = accessToken.value || localStorage.getItem(CONVEX_AUTH_JWT_KEY);
   const refreshToken = localStorage.getItem(CONVEX_AUTH_REFRESH_KEY);
 
-  if (isTokenExpired(token) && refreshToken) {
-    // Attempt silent refresh
-    try {
-      const result = await authClient.action(
-        api.auth.signIn,
-        { refreshToken }
-      );
+  if (isTokenExpired(token)) {
+    if (refreshToken) {
+      // Attempt silent refresh
+      try {
+        const result = await authClient.action(
+          api.auth.signIn,
+          { refreshToken }
+        );
 
-      if (result && result.tokens) {
-        await setTokens(result.tokens.token, result.tokens.refreshToken);
-        token = result.tokens.token;
-      } else {
+        if (result && result.tokens) {
+          await setTokens(result.tokens.token, result.tokens.refreshToken);
+          token = result.tokens.token;
+        } else {
+          await setTokens(null, null);
+          token = null;
+        }
+      } catch (e) {
         await setTokens(null, null);
         token = null;
       }
-    } catch (e) {
+    } else {
       await setTokens(null, null);
       token = null;
     }
   }
 
-  // Update reactive ref if we found a token in storage but it wasn't in the ref
   if (token && !accessToken.value) {
     accessToken.value = token;
+    if (convex) convex.setAuth(fetchAccessToken);
   }
 
   return token;
 }
 
-// Ensure auth reactivity runs in browser environments
-if (typeof window !== 'undefined') {
-  const initialToken = localStorage.getItem(CONVEX_AUTH_JWT_KEY);
-  accessToken.value = initialToken;
-  isLoading.value = false;
+let isRestoring = false;
+export async function restoreSession() {
+  if (typeof window === 'undefined' || isRestoring) return;
+  isRestoring = true;
+  isLoading.value = true;
 
+  try {
+    const token = localStorage.getItem(CONVEX_AUTH_JWT_KEY);
+    const refreshToken = localStorage.getItem(CONVEX_AUTH_REFRESH_KEY);
+
+    if (token && !isTokenExpired(token)) {
+      accessToken.value = token;
+      if (convex) convex.setAuth(fetchAccessToken);
+    } else if (refreshToken) {
+      await fetchAccessToken();
+    } else {
+      await setTokens(null, null);
+    }
+  } catch (err) {
+    console.error("Failed to restore auth session:", err);
+    await setTokens(null, null);
+  } finally {
+    isLoading.value = false;
+    isRestoring = false;
+  }
+}
+
+export function initAuth(url: string) {
+  if (!authClient) {
+    authClient = new ConvexHttpClient(url);
+  }
+  restoreSession();
+}
+
+// Window storage event listener for cross-tab session synchronization
+if (typeof window !== 'undefined') {
   window.addEventListener('storage', (event: StorageEvent) => {
     if (event.key === CONVEX_AUTH_JWT_KEY) {
       accessToken.value = event.newValue;
-      if (event.newValue) {
+      if (event.newValue && !isTokenExpired(event.newValue)) {
         if (convex) convex.setAuth(fetchAccessToken);
       } else {
         if (convex) convex.setAuth(async () => null);
@@ -155,6 +185,7 @@ export function useAuth() {
     isAuthenticated,
     isLoading,
     signIn,
-    signOut
+    signOut,
+    restoreSession
   };
 }

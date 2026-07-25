@@ -12,7 +12,6 @@
   "dependencies": {
     "@auth/core": "^0.41.2",
     "@convex-dev/auth": "^0.0.94",
-    "@writer/shared": "workspace:*",
     "@lucide/vue": "^1.25.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
@@ -35,8 +34,10 @@
     "@tiptap/pm": "^3.28.0",
     "@tiptap/starter-kit": "^3.28.0",
     "@tiptap/vue-3": "^3.28.0",
+    "@writer/shared": "workspace:*",
     "tiptap-markdown": "^0.9.0",
-    "vue": "^3.5.13"
+    "vue": "^3.5.13",
+    "vue-router": "4"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

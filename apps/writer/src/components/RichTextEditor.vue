@@ -25,9 +25,10 @@ import { LineHeight } from '@/extensions/LineHeight'
 import { ParagraphShading } from '@/extensions/ParagraphShading'
 import { Callout } from '@/extensions/Callout'
 
+import { useRouter } from 'vue-router'
 import { api } from '@convex/_generated/api'
 import type { Id } from '@convex/_generated/dataModel'
-import { convex, useQuery, useMutation, useAuth } from '@writer/shared'
+import { convex, useQuery, useMutation, useAuth, parseConvexError } from '@writer/shared'
 import MediaExplorerModal from '@/components/MediaExplorerModal.vue'
 
 // Icons
@@ -40,9 +41,11 @@ import {
   Search, Pilcrow, Indent as IndentIcon, Outdent, 
   Trash2, Plus, ArrowDownToLine, ArrowRightToLine, ChevronDown,
   Eraser, Save, AArrowUp, AArrowDown, Type, AlignVerticalJustifyCenter,
-  Loader2, Ban, Code, Quote, MessageSquare, Download, LogOut
+  Loader2, Ban, Code, Quote, MessageSquare, Download, LogOut, Shield,
+  Globe, FileText
 } from '@lucide/vue'
 
+const router = useRouter()
 const { signOut } = useAuth()
 
 const model = defineModel<string>({
@@ -52,6 +55,10 @@ const model = defineModel<string>({
 // UI State
 const showFindReplace = ref(false)
 const activeDropdown = ref<string | null>(null)
+
+const { data: currentUserRoles } = useQuery(api.permissions.getUserRoles)
+const { data: userPermissions } = useQuery(api.permissions.getUserPermissions)
+const isAdmin = computed(() => currentUserRoles.value?.includes('admin'))
 
 const toggleDropdown = (name: string) => {
   activeDropdown.value = activeDropdown.value === name ? null : name
@@ -64,11 +71,52 @@ const currentShadingColor = ref('#e5e7eb')
 
 const documentName = ref('Untitled Document')
 const currentDocumentId = ref<string | null>(null)
+const currentDocUserId = ref<string | null>(null)
 const editorScrollContainer = ref<HTMLElement | null>(null)
 
 const { data: documents } = useQuery(api.documents.list)
+
+const sortedDocuments = computed(() => {
+  if (!documents.value) return []
+  const ownDocs = (documents.value as any[]).filter(d => d.isOwn)
+  const otherDocs = (documents.value as any[]).filter(d => !d.isOwn)
+  return [...ownDocs, ...otherDocs]
+})
+
+const canEditCurrentDocument = computed(() => {
+  if (!userPermissions.value) return false
+  if (userPermissions.value.includes('*') || userPermissions.value.includes('doc.update')) {
+    return true
+  }
+  // Check ownership if user has doc.update.own
+  if (userPermissions.value.includes('doc.update.own')) {
+    if (!currentDocumentId.value) {
+      return userPermissions.value.includes('doc.create')
+    }
+    const loadedDoc = (documents.value as any[])?.find((d: any) => d._id === currentDocumentId.value)
+    if (loadedDoc?.isOwn) return true
+  }
+  return false
+})
 const saveDoc = useMutation(api.documents.save)
 const removeDoc = useMutation(api.documents.remove)
+const togglePublishStatusMutation = useMutation(api.documents.togglePublishStatus)
+
+const isCurrentDocPublished = computed(() => {
+  if (!currentDocumentId.value || !documents.value) return false
+  const doc = (documents.value as any[])?.find(d => d._id === currentDocumentId.value)
+  return doc?.isPublished ?? false
+})
+
+const handleTogglePublish = async () => {
+  if (!currentDocumentId.value || !canEditCurrentDocument.value) return
+  const nextState = !isCurrentDocPublished.value
+  try {
+    await togglePublishStatusMutation({ id: currentDocumentId.value as Id<"documents">, isPublished: nextState })
+  } catch (err: unknown) {
+    alert(parseConvexError(err, "Failed to update document status."))
+  }
+}
 
 const isSaving = ref(false)
 const isDownloading = ref(false)
@@ -78,12 +126,27 @@ let isLoadingDocument = false
 const isMediaExplorerOpen = ref(false)
 const createImage = useMutation(api.images.create)
 
+const userCanDeleteDoc = (doc: any) => {
+  if (!userPermissions.value) return false
+  if (userPermissions.value.includes('*') || userPermissions.value.includes('doc.delete')) {
+    return true
+  }
+  if (doc.isOwn && userPermissions.value.includes('doc.delete.own')) {
+    return true
+  }
+  return false
+}
+
 const handleMediaInsert = (payload: { url: string, imageId: string }) => {
+  if (!canEditCurrentDocument.value) return
   editor.value?.chain().focus().setImage({ src: payload.url, imageId: payload.imageId } as any).run()
   isMediaExplorerOpen.value = false
 }
 
 const deleteDocument = async (id: string) => {
+  const targetDoc = (documents.value as any[])?.find((d: any) => d._id === id)
+  if (targetDoc && !userCanDeleteDoc(targetDoc)) return
+
   if (confirm("Are you sure you want to delete this document?")) {
     await removeDoc({ id: id as Id<"documents"> })
     if (currentDocumentId.value === id) {
@@ -92,15 +155,26 @@ const deleteDocument = async (id: string) => {
   }
 }
 
+const isContentEmpty = (html: string): boolean => {
+  if (!html) return true
+  if (html.includes('<img')) return false
+  
+  const textContent = editor.value?.getText().trim() ?? ''
+  if (textContent !== '') return false
+
+  const sanitized = html.replace(/<p>\s*(<br\s*\/?>)?\s*<\/p>|<[^>]+>|\s/gi, '')
+  return sanitized.length === 0
+}
+
 const saveDocument = async () => {
-  if (!editor.value) return
+  if (!editor.value || !canEditCurrentDocument.value) return
   
   const htmlContent = editor.value.getHTML()
   const savingId = currentDocumentId.value
   const savingTitle = documentName.value
   
   // Prevent saving completely empty new documents
-  if (!savingId && (htmlContent === '<p></p>' || htmlContent === '')) {
+  if (!savingId && isContentEmpty(htmlContent)) {
     return
   }
 
@@ -137,6 +211,7 @@ const saveDocument = async () => {
 const loadDocument = (doc: any) => {
   isLoadingDocument = true
   currentDocumentId.value = doc._id
+  currentDocUserId.value = doc.userId
   documentName.value = doc.title
   editor.value?.commands.setContent(doc.content)
   
@@ -151,6 +226,7 @@ const loadDocument = (doc: any) => {
 const createNewDocument = () => {
   isLoadingDocument = true
   currentDocumentId.value = null
+  currentDocUserId.value = null
   documentName.value = 'Untitled Document'
   model.value = ''
   editor.value?.commands.setContent('')
@@ -281,7 +357,7 @@ const editor = useEditor({
     currentShadingColor.value = editor.getAttributes('paragraph').shading || '#e5e7eb'
   },
   onUpdate: ({ editor }) => {
-    if (isLoadingDocument) return
+    if (isLoadingDocument || !canEditCurrentDocument.value) return
     model.value = editor.getHTML()
     clearTimeout(saveTimeout)
     saveTimeout = setTimeout(saveDocument, 2000)
@@ -291,6 +367,12 @@ const editor = useEditor({
 onBeforeUnmount(() => {
   clearTimeout(saveTimeout)
 })
+
+watch([editor, canEditCurrentDocument], ([ed, canEdit]) => {
+  if (ed) {
+    ed.setEditable(canEdit)
+  }
+}, { immediate: true })
 
 // Computed State
 const currentHeading = computed(() => {
@@ -430,6 +512,7 @@ const toggleLink = () => {
 const generateUploadUrl = useMutation(api.storage.generateUploadUrl)
 
 const addImage = async () => {
+  if (!canEditCurrentDocument.value) return
   const input = document.createElement('input')
   input.type = 'file'
   input.accept = 'image/*'
@@ -457,9 +540,9 @@ const addImage = async () => {
           const imageId = await createImage({ storageId, url, name: file.name })
           editor.value?.chain().focus().setImage({ src: url, imageId } as any).run()
         }
-      } catch (error) {
+      } catch (error: unknown) {
         console.error("Failed to upload image:", error)
-        alert("Failed to upload image. Please try again.")
+        alert(parseConvexError(error, "Failed to upload image. Please try again."))
       } finally {
         isSaving.value = false
       }
@@ -525,26 +608,49 @@ const removeShadingColor = () => {
       <div class="w-1/3 flex items-center gap-2">
         <div class="font-bold tracking-tight text-primary-600 dark:text-primary-500">Writer</div>
         
-        <div :class="['relative', activeDropdown === 'documents' ? 'z-60!' : 'z-40!']">
-          <button @click="toggleDropdown('documents')" class="text-sm px-2 py-1 hover:bg-surface-100 dark:hover:bg-surface-800 rounded flex items-center gap-1 text-surface-600 dark:text-surface-300">
-            My Documents <ChevronDown class="w-3 h-3 opacity-60" />
+        <div class="relative">
+          <button @click="toggleDropdown('documents')" class="text-xs font-semibold px-2.5 py-1 hover:bg-surface-100 dark:hover:bg-surface-800 rounded flex items-center gap-1.5 text-surface-700 dark:text-surface-200 border border-surface-200 dark:border-surface-700 transition-colors shadow-2xs">
+            <span>Documents Explorer</span> <ChevronDown class="w-3 h-3 opacity-60" />
           </button>
           
-          <div v-if="activeDropdown === 'documents'" class="absolute z-60 top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg min-w-[200px] max-w-[250px] text-sm py-1 overflow-hidden">
-            <button @click="createNewDocument" class="w-full text-left px-3 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 text-primary-600 flex items-center gap-2">
-              <Plus class="w-4 h-4" /> New Document
+          <div v-if="activeDropdown === 'documents'" class="absolute z-60 top-full mt-1.5 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-lg shadow-xl min-w-72 max-w-80 text-xs py-1.5 overflow-hidden">
+            <button @click="createNewDocument" class="w-full text-left px-3 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 text-primary-600 dark:text-primary-400 font-bold flex items-center gap-2">
+              <Plus class="w-4 h-4" /> Create New Document
             </button>
             <div class="w-full h-px bg-surface-200 dark:bg-surface-700 my-1"></div>
             
-            <div class="max-h-[300px] overflow-y-auto no-scrollbar">
-              <div v-if="!documents" class="px-3 py-2 text-surface-400 italic">Loading...</div>
-              <div v-else-if="documents.length === 0" class="px-3 py-2 text-surface-400 italic">No saved documents</div>
+            <div class="max-h-80 overflow-y-auto no-scrollbar divide-y divide-surface-100 dark:divide-surface-700/50">
+              <div v-if="!documents" class="px-3 py-2 text-surface-400 italic">Loading documents...</div>
+              <div v-else-if="sortedDocuments.length === 0" class="px-3 py-2 text-surface-400 italic">No saved documents</div>
               
-              <div v-for="doc in documents" :key="doc._id" class="flex items-center justify-between w-full hover:bg-surface-100 dark:hover:bg-surface-700 px-3 py-1.5 group">
-                <button @click="loadDocument(doc)" class="text-left flex-1 truncate mr-2" :title="doc.title || 'Untitled Document'">
-                  {{ doc.title || 'Untitled Document' }}
+              <div 
+                v-for="doc in sortedDocuments" 
+                :key="doc._id" 
+                :class="[
+                  'flex items-center justify-between w-full px-3 py-2 group transition-colors',
+                  currentDocumentId === doc._id 
+                    ? 'bg-primary-50/90 dark:bg-primary-950/60 border-l-2 border-primary-600 dark:border-primary-400 text-primary-950 dark:text-primary-100 font-medium' 
+                    : 'hover:bg-surface-50 dark:hover:bg-surface-700/60 text-surface-900 dark:text-surface-100'
+                ]"
+              >
+                <button @click="loadDocument(doc)" class="text-left flex-1 min-w-0 mr-2 cursor-pointer flex items-center justify-between">
+                  <div class="min-w-0 flex-1">
+                    <div class="font-medium truncate flex items-center gap-1.5" :title="doc.title || 'Untitled Document'">
+                      <span class="truncate">{{ doc.title || 'Untitled Document' }}</span>
+                      <span :class="[
+                        'px-1.5 py-0.2 text-[9px] font-bold rounded uppercase tracking-wider shrink-0 border',
+                        doc.isPublished ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800' : 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300 border-amber-300 dark:border-amber-800'
+                      ]">
+                        {{ doc.isPublished ? 'Published' : 'Draft' }}
+                      </span>
+                    </div>
+                    <div class="text-[11px] text-surface-500 dark:text-surface-400 truncate flex items-center gap-1.5 mt-0.5">
+                      <span v-if="doc.isOwn" class="w-2 h-2 rounded-full bg-emerald-500 shrink-0" title="Your document"></span>
+                      <span>{{ doc.authorEmail }}</span>
+                    </div>
+                  </div>
                 </button>
-                <button @click.stop="deleteDocument(doc._id)" class="opacity-0 group-hover:opacity-100 p-1 text-surface-400 hover:text-red-500 rounded transition-opacity" title="Delete Document">
+                <button v-if="userCanDeleteDoc(doc)" @click.stop="deleteDocument(doc._id)" class="opacity-0 group-hover:opacity-100 p-1 text-surface-400 hover:text-red-500 rounded transition-opacity cursor-pointer" title="Delete Document">
                   <Trash2 class="w-3.5 h-3.5" />
                 </button>
               </div>
@@ -553,29 +659,65 @@ const removeShadingColor = () => {
         </div>
       </div>
       
-      <div class="w-1/3 flex justify-center">
+      <div class="w-1/3 flex items-center justify-center gap-2">
         <input 
+          v-if="canEditCurrentDocument"
           v-model="documentName" 
-          class="text-center text-sm font-medium text-surface-600 dark:text-surface-300 bg-transparent border border-transparent hover:border-surface-300 rounded px-2 py-1 outline-none transition-colors w-full max-w-[200px]" 
+          class="text-center text-sm font-medium text-surface-600 dark:text-surface-300 bg-transparent border border-transparent hover:border-surface-300 rounded px-2 py-1 outline-none transition-colors w-full max-w-50" 
         />
+        <span v-else class="text-center text-sm font-bold text-surface-800 dark:text-surface-200 truncate max-w-60 cursor-default" :title="documentName">
+          {{ documentName }}
+        </span>
+
+        <!-- <div v-if="!canEditCurrentDocument" class="flex items-center gap-1.5 px-2.5 py-0.5 text-[11px] font-bold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/70 border border-amber-300 dark:border-amber-800 rounded-md shrink-0 shadow-2xs">
+          <Eye class="w-3.5 h-3.5" /> Read Only
+        </div> -->
       </div>
       
       <div class="w-1/3 flex items-center justify-end gap-1">
-        <button @click="editor?.chain().focus().undo().run()" :disabled="!editor?.can().undo()" class="toolbar-btn min-h-[28px]! min-w-[28px]! opacity-70 hover:opacity-100" title="Undo"><Undo class="w-4 h-4" /></button>
-        <button @click="editor?.chain().focus().redo().run()" :disabled="!editor?.can().redo()" class="toolbar-btn min-h-[28px]! min-w-[28px]! opacity-70 hover:opacity-100" title="Redo"><Redo class="w-4 h-4" /></button>
-        
-        <div class="w-px h-5 bg-surface-300 dark:bg-surface-700 mx-1"></div>
+        <template v-if="canEditCurrentDocument">
+          <button @click="editor?.chain().focus().undo().run()" :disabled="!editor?.can().undo()" class="toolbar-btn min-h-7! min-w-7! opacity-70 hover:opacity-100" title="Undo"><Undo class="w-4 h-4" /></button>
+          <button @click="editor?.chain().focus().redo().run()" :disabled="!editor?.can().redo()" class="toolbar-btn min-h-7! min-w-7! opacity-70 hover:opacity-100" title="Redo"><Redo class="w-4 h-4" /></button>
+          
+          <div class="w-px h-5 bg-surface-300 dark:bg-surface-700 mx-1"></div>
 
-        <button @click="saveDocument" class="toolbar-btn min-h-[28px]! min-w-[28px]! p-1" title="Save">
-          <Loader2 v-if="isSaving" class="w-4 h-4 animate-spin text-primary-500" />
-          <Save v-else class="w-4 h-4 text-primary-600 dark:text-primary-400" />
+          <button @click="saveDocument" class="toolbar-btn min-h-7! min-w-7! p-1" title="Save">
+            <Loader2 v-if="isSaving" class="w-4 h-4 animate-spin text-primary-500" />
+            <Save v-else class="w-4 h-4 text-primary-600 dark:text-primary-400" />
+          </button>
+          <button @click="exportHTML" class="toolbar-btn min-h-7! min-w-7! p-1 text-primary-600 dark:text-primary-400" title="Download as HTML">
+            <Loader2 v-if="isDownloading" class="w-4 h-4 animate-spin" />
+            <Download v-else class="w-4 h-4" />
+          </button>
+
+          <!-- Interactive Publish / Draft Toggle Button -->
+          <button
+            v-if="currentDocumentId"
+            @click="handleTogglePublish"
+            :class="[
+              'flex items-center gap-1 px-2 py-1 text-xs font-bold rounded-md border transition-all cursor-pointer shadow-2xs ml-1',
+              isCurrentDocPublished
+                ? 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800 hover:bg-emerald-200'
+                : 'bg-amber-100 dark:bg-amber-950/80 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800 hover:bg-amber-200'
+            ]"
+            :title="isCurrentDocPublished ? 'Published: Visible to web readers. Click to toggle to Draft.' : 'Draft: Only visible to editors. Click to Publish.'"
+          >
+            <Globe v-if="isCurrentDocPublished" class="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+            <FileText v-else class="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+            <span>{{ isCurrentDocPublished ? 'Published' : 'Draft' }}</span>
+          </button>
+          
+          <div class="w-px h-5 bg-surface-300 dark:bg-surface-700 mx-1"></div>
+        </template>
+        <button
+          v-if="isAdmin"
+          @click="router.push('/admin')"
+          class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-purple-700 dark:text-purple-300 bg-purple-100 dark:bg-purple-950/70 hover:bg-purple-200 dark:hover:bg-purple-900 border border-purple-200 dark:border-purple-800 rounded-md transition-colors shadow-sm ml-1 cursor-pointer"
+          title="Open Full Admin Portal"
+        >
+          <Shield class="w-3.5 h-3.5" /> Admin Portal
         </button>
-        <button @click="exportHTML" class="toolbar-btn min-h-[28px]! min-w-[28px]! p-1 text-primary-600 dark:text-primary-400" title="Download as HTML">
-          <Loader2 v-if="isDownloading" class="w-4 h-4 animate-spin" />
-          <Download v-else class="w-4 h-4" />
-        </button>
-        
-        <div class="w-px h-5 bg-surface-300 dark:bg-surface-700 mx-1"></div>
+
         <button @click="handleSignOut" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 rounded-md transition-colors shadow-sm ml-2" title="Sign Out">
           <LogOut class="w-3.5 h-3.5" /> Sign Out
         </button>
@@ -585,8 +727,16 @@ const removeShadingColor = () => {
     <!-- Global Clickaway Overlay for Dropdowns -->
     <div v-if="activeDropdown" class="fixed inset-0 z-40" @click="closeDropdown"></div>
 
-    <!-- Ribbon Toolbar -->
-    <div v-if="editor" class="flex flex-col shrink-0 bg-surface-50 dark:bg-surface-900 border-b border-surface-200 dark:border-surface-800 z-50 shadow-sm relative">
+    <!-- Read-Only Banner Bar (Rendered when user lacks edit permissions) -->
+    <!-- <div v-if="!canEditCurrentDocument" class="h-12 bg-amber-50 dark:bg-amber-950/60 border-b border-amber-200 dark:border-amber-900 flex items-center justify-center px-4 shrink-0 shadow-2xs z-50">
+      <div class="flex items-center gap-2 text-xs font-semibold text-amber-800 dark:text-amber-200">
+        <Eye class="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+        <span>Read-Only Mode: You are viewing this document. Editing, formatting, and media insertion are disabled.</span>
+      </div>
+    </div> -->
+
+    <!-- Ribbon Toolbar (Rendered ONLY when user HAS edit permission) -->
+    <div v-if="canEditCurrentDocument && editor" class="flex flex-col shrink-0 bg-surface-50 dark:bg-surface-900 border-b border-surface-200 dark:border-surface-800 z-50 shadow-sm relative">
       <div class="flex flex-wrap items-center gap-1 px-3 py-2">
         
         <!-- Font Family & Size -->
@@ -595,7 +745,7 @@ const removeShadingColor = () => {
             <span class="truncate">{{ currentFontFamily }}</span>
             <ChevronDown class="w-3 h-3 ml-1 shrink-0 opacity-50" />
           </button>
-          <div v-if="activeDropdown === 'fontFamily'" class="absolute top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg py-1 min-w-[200px] text-xs max-h-[300px] overflow-y-auto no-scrollbar">
+          <div v-if="activeDropdown === 'fontFamily'" class="absolute top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg py-1 min-w-50 text-xs max-h-75 overflow-y-auto no-scrollbar">
             <button @click="setFontFamily('')" class="w-full text-left px-3 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap">Default Font</button>
             <button @click="setFontFamily('Arial')" class="w-full text-left px-3 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap font-[Arial]">Arial</button>
             <button @click="setFontFamily('Comic Sans MS')" class="w-full text-left px-3 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap" style="font-family: 'Comic Sans MS'">Comic Sans MS</button>
@@ -623,23 +773,23 @@ const removeShadingColor = () => {
           </div>
         </div>
 
-        <button @click="changeFontSize(2)" class="toolbar-btn min-h-[24px]! min-w-[24px]!" title="Increase Font Size"><AArrowUp class="w-3.5 h-3.5" /></button>
-        <button @click="changeFontSize(-2)" class="toolbar-btn min-h-[24px]! min-w-[24px]!" title="Decrease Font Size"><AArrowDown class="w-3.5 h-3.5" /></button>
+        <button @click="changeFontSize(2)" class="toolbar-btn min-h-6! min-w-6!" title="Increase Font Size"><AArrowUp class="w-3.5 h-3.5" /></button>
+        <button @click="changeFontSize(-2)" class="toolbar-btn min-h-6! min-w-6!" title="Decrease Font Size"><AArrowDown class="w-3.5 h-3.5" /></button>
 
         <div class="w-px h-4 bg-surface-300 dark:bg-surface-700 mx-0.5"></div>
 
         <!-- Formatting & Headers -->
-        <button @click="editor?.chain().focus().toggleBold().run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('bold') }]" title="Bold"><Bold class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().toggleItalic().run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('italic') }]" title="Italic"><Italic class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().toggleUnderline().run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('underline') }]" title="Underline"><UnderlineIcon class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().toggleStrike().run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('strike') }]" title="Strikethrough"><Strikethrough class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().toggleBlockquote().run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('blockquote') }]" title="Blockquote"><Quote class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().toggleBold().run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('bold') }]" title="Bold"><Bold class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().toggleItalic().run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('italic') }]" title="Italic"><Italic class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().toggleUnderline().run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('underline') }]" title="Underline"><UnderlineIcon class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().toggleStrike().run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('strike') }]" title="Strikethrough"><Strikethrough class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().toggleBlockquote().run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('blockquote') }]" title="Blockquote"><Quote class="w-3.5 h-3.5" /></button>
         
         <div :class="['relative', activeDropdown === 'callout' ? 'z-50' : 'z-30']">
-          <button @click="toggleDropdown('callout')" :class="['toolbar-btn min-h-[24px]! min-w-[24px]! flex items-center gap-0.5', { 'is-active': editor?.isActive('callout') }]" title="Callout / Alert">
+          <button @click="toggleDropdown('callout')" :class="['toolbar-btn min-h-6! min-w-6! flex items-center gap-0.5', { 'is-active': editor?.isActive('callout') }]" title="Callout / Alert">
             <MessageSquare class="w-3.5 h-3.5" /><ChevronDown class="w-2.5 h-2.5 -ml-0.5 opacity-60" />
           </button>
-          <div v-if="activeDropdown === 'callout'" class="absolute top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg min-w-[120px] text-sm py-1">
+          <div v-if="activeDropdown === 'callout'" class="absolute top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg min-w-30 text-sm py-1">
             <button @click="editor?.chain().focus().toggleCallout({ type: 'note' }).run(); closeDropdown()" class="w-full text-left px-3 py-1.5 hover:bg-surface-100 dark:hover:bg-surface-700 flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-blue-500"></div> Note</button>
             <button @click="editor?.chain().focus().toggleCallout({ type: 'info' }).run(); closeDropdown()" class="w-full text-left px-3 py-1.5 hover:bg-surface-100 dark:hover:bg-surface-700 flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-blue-400"></div> Info</button>
             <button @click="editor?.chain().focus().toggleCallout({ type: 'warning' }).run(); closeDropdown()" class="w-full text-left px-3 py-1.5 hover:bg-surface-100 dark:hover:bg-surface-700 flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-orange-500"></div> Warning</button>
@@ -649,15 +799,15 @@ const removeShadingColor = () => {
           </div>
         </div>
 
-        <button @click="editor?.chain().focus().toggleCodeBlock().run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('codeBlock') }]" title="Code Block"><Code class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().unsetSuperscript().toggleSubscript().run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('subscript') }]" title="Subscript"><SubscriptIcon class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().unsetSubscript().toggleSuperscript().run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('superscript') }]" title="Superscript"><SuperscriptIcon class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().toggleCodeBlock().run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('codeBlock') }]" title="Code Block"><Code class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().unsetSuperscript().toggleSubscript().run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('subscript') }]" title="Subscript"><SubscriptIcon class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().unsetSubscript().toggleSuperscript().run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('superscript') }]" title="Superscript"><SuperscriptIcon class="w-3.5 h-3.5" /></button>
 
         <div :class="['relative', activeDropdown === 'case' ? 'z-50' : 'z-30']">
-          <button @click="toggleDropdown('case')" class="toolbar-btn min-h-[24px]! min-w-[24px]! flex items-center gap-0.5" title="Change Case">
+          <button @click="toggleDropdown('case')" class="toolbar-btn min-h-6! min-w-6! flex items-center gap-0.5" title="Change Case">
             <Type class="w-3.5 h-3.5" /><ChevronDown class="w-2.5 h-2.5 -ml-0.5 opacity-60" />
           </button>
-          <div v-if="activeDropdown === 'case'" class="absolute top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg min-w-[160px] text-sm py-1">
+          <div v-if="activeDropdown === 'case'" class="absolute top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg min-w-40 text-sm py-1">
             <button @click="applyCase('sentence')" class="w-full text-left px-4 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap">Sentence case.</button>
             <button @click="applyCase('lower')" class="w-full text-left px-4 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap">lowercase</button>
             <button @click="applyCase('upper')" class="w-full text-left px-4 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap">UPPERCASE</button>
@@ -666,14 +816,14 @@ const removeShadingColor = () => {
           </div>
         </div>
 
-        <button @click="editor?.chain().focus().clearNodes().unsetAllMarks().run()" class="toolbar-btn min-h-[24px]! min-w-[24px]! text-red-500 hover:text-red-600 dark:hover:text-red-400" title="Clear Formatting"><Eraser class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().clearNodes().unsetAllMarks().run()" class="toolbar-btn min-h-6! min-w-6! text-red-500 hover:text-red-600 dark:hover:text-red-400" title="Clear Formatting"><Eraser class="w-3.5 h-3.5" /></button>
         
         <div :class="['relative', activeDropdown === 'heading' ? 'z-50' : 'z-30']">
           <button @click="toggleDropdown('heading')" class="toolbar-select w-12 flex items-center justify-between px-1.5 py-1 text-xs truncate bg-white dark:bg-surface-800 hover:bg-surface-100 dark:hover:bg-surface-700" title="Heading Level">
             <span class="truncate">{{ currentHeading }}</span>
             <ChevronDown class="w-3 h-3 ml-0.5 shrink-0 opacity-50" />
           </button>
-          <div v-if="activeDropdown === 'heading'" class="absolute top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg min-w-[120px] text-sm py-1">
+          <div v-if="activeDropdown === 'heading'" class="absolute top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg min-w-30 text-sm py-1">
             <button @click="setHeading(0)" :class="['w-full text-left px-3 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap', { 'text-primary-600 bg-surface-50 dark:bg-surface-700': currentHeading === 'P' }]">Normal</button>
             <button @click="setHeading(1)" :class="['w-full text-left px-3 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap font-bold text-xl', { 'text-primary-600 bg-surface-50 dark:bg-surface-700': currentHeading === 'H1' }]">Heading 1</button>
             <button @click="setHeading(2)" :class="['w-full text-left px-3 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap font-bold text-lg', { 'text-primary-600 bg-surface-50 dark:bg-surface-700': currentHeading === 'H2' }]">Heading 2</button>
@@ -688,17 +838,17 @@ const removeShadingColor = () => {
 
         <!-- Colors -->
         <div class="flex items-center bg-surface-100 dark:bg-surface-800 rounded">
-          <button @click="applyTextColor" class="toolbar-btn min-h-[24px]! min-w-[24px]! rounded-r-none! relative hover:bg-surface-200 dark:hover:bg-surface-700" title="Text Color">
+          <button @click="applyTextColor" class="toolbar-btn min-h-6! min-w-6! rounded-r-none! relative hover:bg-surface-200 dark:hover:bg-surface-700" title="Text Color">
             <div class="flex flex-col items-center">
               <span class="font-serif font-bold text-xs leading-none">A</span>
               <div class="w-3 h-1 mt-0.5" :style="{ backgroundColor: currentTextColor }"></div>
             </div>
           </button>
           <div :class="['relative', activeDropdown === 'textColor' ? 'z-50' : 'z-30']">
-            <button @click="toggleDropdown('textColor')" class="toolbar-btn min-h-[24px]! w-[16px]! px-0! rounded-l-none! border-l border-surface-200 dark:border-surface-700 hover:bg-surface-200 dark:hover:bg-surface-700" title="Choose Text Color">
+            <button @click="toggleDropdown('textColor')" class="toolbar-btn min-h-6! min-w-6! rounded-l-none! border-l border-surface-200 dark:border-surface-700 hover:bg-surface-200 dark:hover:bg-surface-700" title="Choose Text Color">
               <ChevronDown class="w-3 h-3" />
             </button>
-            <div v-if="activeDropdown === 'textColor'" class="absolute top-full mt-1 left-0 md:-ml-8 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg p-2 min-w-[160px]">
+            <div v-if="activeDropdown === 'textColor'" class="absolute top-full mt-1 left-0 md:-ml-8 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg p-2 min-w-40">
               <button @click="removeTextColor" class="w-full flex items-center justify-center gap-2 text-xs py-1.5 mb-2 rounded hover:bg-surface-100 dark:hover:bg-surface-700">
                 <Ban class="w-3.5 h-3.5 text-red-500" /> Remove Color
               </button>
@@ -716,17 +866,17 @@ const removeShadingColor = () => {
         </div>
 
         <div class="flex items-center bg-surface-100 dark:bg-surface-800 rounded">
-          <button @click="applyHighlightColor" class="toolbar-btn min-h-[24px]! min-w-[24px]! rounded-r-none! relative hover:bg-surface-200 dark:hover:bg-surface-700" title="Highlight Color">
+          <button @click="applyHighlightColor" class="toolbar-btn min-h-6! min-w-6! rounded-r-none! relative hover:bg-surface-200 dark:hover:bg-surface-700" title="Highlight Color">
             <div class="flex flex-col items-center">
               <Highlighter class="w-3.5 h-3.5" />
               <div class="w-3 h-1 mt-0.5 border border-surface-300 dark:border-surface-600" :style="{ backgroundColor: currentHighlightColor }"></div>
             </div>
           </button>
           <div :class="['relative', activeDropdown === 'highlightColor' ? 'z-50' : 'z-30']">
-            <button @click="toggleDropdown('highlightColor')" class="toolbar-btn min-h-[24px]! w-[16px]! px-0! rounded-l-none! border-l border-surface-200 dark:border-surface-700 hover:bg-surface-200 dark:hover:bg-surface-700" title="Choose Highlight Color">
+            <button @click="toggleDropdown('highlightColor')" class="toolbar-btn min-h-6! w-4! px-0! rounded-l-none! border-l border-surface-200 dark:border-surface-700 hover:bg-surface-200 dark:hover:bg-surface-700" title="Choose Highlight Color">
               <ChevronDown class="w-3 h-3" />
             </button>
-            <div v-if="activeDropdown === 'highlightColor'" class="absolute top-full mt-1 left-0 md:-ml-8 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg p-2 min-w-[160px]">
+            <div v-if="activeDropdown === 'highlightColor'" class="absolute top-full mt-1 left-0 md:-ml-8 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg p-2 min-w-40">
               <button @click="removeHighlightColor" class="w-full flex items-center justify-center gap-2 text-xs py-1.5 mb-2 rounded hover:bg-surface-100 dark:hover:bg-surface-700">
                 <Ban class="w-3.5 h-3.5 text-red-500" /> No Highlight
               </button>
@@ -744,17 +894,17 @@ const removeShadingColor = () => {
         </div>
         
         <div class="flex items-center bg-surface-100 dark:bg-surface-800 rounded">
-          <button @click="applyShadingColor" class="toolbar-btn min-h-[24px]! min-w-[24px]! rounded-r-none! relative hover:bg-surface-200 dark:hover:bg-surface-700" title="Shading">
+          <button @click="applyShadingColor" class="toolbar-btn min-h-6! min-w-6! rounded-r-none! relative hover:bg-surface-200 dark:hover:bg-surface-700" title="Shading">
             <div class="flex flex-col items-center">
               <PaintBucket class="w-3 h-3" />
               <div class="w-3 h-1 mt-0.5 border border-surface-300 dark:border-surface-600" :style="{ backgroundColor: currentShadingColor }"></div>
             </div>
           </button>
           <div :class="['relative', activeDropdown === 'shadingColor' ? 'z-50' : 'z-30']">
-            <button @click="toggleDropdown('shadingColor')" class="toolbar-btn min-h-[24px]! w-[16px]! px-0! rounded-l-none! border-l border-surface-200 dark:border-surface-700 hover:bg-surface-200 dark:hover:bg-surface-700" title="Choose Shading Color">
+            <button @click="toggleDropdown('shadingColor')" class="toolbar-btn min-h-6! w-4! px-0! rounded-l-none! border-l border-surface-200 dark:border-surface-700 hover:bg-surface-200 dark:hover:bg-surface-700" title="Choose Shading Color">
               <ChevronDown class="w-3 h-3" />
             </button>
-            <div v-if="activeDropdown === 'shadingColor'" class="absolute top-full mt-1 left-0 md:-ml-8 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg p-2 min-w-[160px]">
+            <div v-if="activeDropdown === 'shadingColor'" class="absolute top-full mt-1 left-0 md:-ml-8 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg p-2 min-w-40">
               <button @click="removeShadingColor" class="w-full flex items-center justify-center gap-2 text-xs py-1.5 mb-2 rounded hover:bg-surface-100 dark:hover:bg-surface-700">
                 <Ban class="w-3.5 h-3.5 text-red-500" /> No Shading
               </button>
@@ -774,16 +924,16 @@ const removeShadingColor = () => {
         <div class="w-px h-4 bg-surface-300 dark:bg-surface-700 mx-0.5"></div>
 
         <!-- Utility & Inserts -->
-        <button @click="showFormattingMarks = !showFormattingMarks" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': showFormattingMarks }]" title="Show Formatting Marks"><Pilcrow class="w-3.5 h-3.5" /></button>
-        <button @click="showFindReplace = !showFindReplace" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': showFindReplace }]" title="Find & Replace"><Search class="w-3.5 h-3.5" /></button>
-        <button @click="insertTable" class="toolbar-btn min-h-[24px]! min-w-[24px]!" title="Insert Table"><TableIcon class="w-3.5 h-3.5" /></button>
-        <button @click="toggleLink" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('link') }]" title="Toggle Link"><LinkIcon class="w-3.5 h-3.5" /></button>
+        <button @click="showFormattingMarks = !showFormattingMarks" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': showFormattingMarks }]" title="Show Formatting Marks"><Pilcrow class="w-3.5 h-3.5" /></button>
+        <button @click="showFindReplace = !showFindReplace" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': showFindReplace }]" title="Find & Replace"><Search class="w-3.5 h-3.5" /></button>
+        <button @click="insertTable" class="toolbar-btn min-h-6! min-w-6!" title="Insert Table"><TableIcon class="w-3.5 h-3.5" /></button>
+        <button @click="toggleLink" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('link') }]" title="Toggle Link"><LinkIcon class="w-3.5 h-3.5" /></button>
         
         <div :class="['relative', activeDropdown === 'image' ? 'z-50' : 'z-30']">
-          <button @click="toggleDropdown('image')" class="toolbar-btn min-h-[24px]! min-w-[24px]! flex items-center gap-0.5" title="Insert Image">
+          <button @click="toggleDropdown('image')" class="toolbar-btn min-h-6! min-w-6! flex items-center gap-0.5" title="Insert Image">
             <ImageIcon class="w-3.5 h-3.5" /><ChevronDown class="w-2.5 h-2.5 -ml-0.5 opacity-60" />
           </button>
-          <div v-if="activeDropdown === 'image'" class="absolute top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg min-w-[200px] text-sm py-1">
+          <div v-if="activeDropdown === 'image'" class="absolute top-full mt-1 left-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg min-w-50 text-sm py-1">
             <button @click="addImage(); closeDropdown()" class="w-full text-left px-4 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap flex items-center gap-2"><ImageIcon class="w-4 h-4"/> Upload from computer</button>
             <button @click="isMediaExplorerOpen = true; closeDropdown()" class="w-full text-left px-4 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap flex items-center gap-2"><ImageIcon class="w-4 h-4"/> Select from internal</button>
           </div>
@@ -792,16 +942,16 @@ const removeShadingColor = () => {
         <div class="w-px h-4 bg-surface-300 dark:bg-surface-700 mx-0.5"></div>
 
         <!-- Paragraph & Lists -->
-        <button @click="editor?.chain().focus().setTextAlign('left').run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive({ textAlign: 'left' }) }]" title="Align Left"><AlignLeft class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().setTextAlign('center').run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive({ textAlign: 'center' }) }]" title="Align Center"><AlignCenter class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().setTextAlign('right').run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive({ textAlign: 'right' }) }]" title="Align Right"><AlignRight class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().setTextAlign('justify').run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive({ textAlign: 'justify' }) }]" title="Justify"><AlignJustify class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().setTextAlign('left').run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive({ textAlign: 'left' }) }]" title="Align Left"><AlignLeft class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().setTextAlign('center').run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive({ textAlign: 'center' }) }]" title="Align Center"><AlignCenter class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().setTextAlign('right').run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive({ textAlign: 'right' }) }]" title="Align Right"><AlignRight class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().setTextAlign('justify').run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive({ textAlign: 'justify' }) }]" title="Justify"><AlignJustify class="w-3.5 h-3.5" /></button>
         
         <div :class="['relative', activeDropdown === 'lineSpacing' ? 'z-50' : 'z-30']">
-          <button @click="toggleDropdown('lineSpacing')" class="toolbar-btn min-h-[24px]! min-w-[24px]! flex items-center gap-0.5" title="Line Spacing">
+          <button @click="toggleDropdown('lineSpacing')" class="toolbar-btn min-h-6! min-w-6! flex items-center gap-0.5" title="Line Spacing">
             <AlignVerticalJustifyCenter class="w-3.5 h-3.5" /><ChevronDown class="w-2.5 h-2.5 -ml-0.5 opacity-60" />
           </button>
-          <div v-if="activeDropdown === 'lineSpacing'" class="absolute top-full mt-1 right-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg py-1 min-w-[100px] text-sm">
+          <div v-if="activeDropdown === 'lineSpacing'" class="absolute top-full mt-1 right-0 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded shadow-lg py-1 min-w-25 text-sm">
             <button @click="editor?.chain().focus().setLineHeight('1.0').run(); closeDropdown()" class="w-full text-left px-4 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap">1.0</button>
             <button @click="editor?.chain().focus().setLineHeight('1.15').run(); closeDropdown()" class="w-full text-left px-4 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap">1.15</button>
             <button @click="editor?.chain().focus().setLineHeight('1.5').run(); closeDropdown()" class="w-full text-left px-4 py-2 hover:bg-surface-100 dark:hover:bg-surface-700 hover:text-primary-600 whitespace-nowrap">1.5</button>
@@ -812,17 +962,17 @@ const removeShadingColor = () => {
 
         <div class="w-px h-4 bg-surface-300 dark:bg-surface-700 mx-0.5"></div>
 
-        <button @click="editor?.chain().focus().toggleBulletList().run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('bulletList') }]" title="Bullet List"><List class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().toggleOrderedList().run()" :class="['toolbar-btn min-h-[24px]! min-w-[24px]!', { 'is-active': editor?.isActive('orderedList') }]" title="Numbered List"><ListOrdered class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().outdent().run()" class="toolbar-btn min-h-[24px]! min-w-[24px]!" title="Decrease Indent"><Outdent class="w-3.5 h-3.5" /></button>
-        <button @click="editor?.chain().focus().indent().run()" class="toolbar-btn min-h-[24px]! min-w-[24px]!" title="Increase Indent"><IndentIcon class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().toggleBulletList().run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('bulletList') }]" title="Bullet List"><List class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().toggleOrderedList().run()" :class="['toolbar-btn min-h-6! min-w-6!', { 'is-active': editor?.isActive('orderedList') }]" title="Numbered List"><ListOrdered class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().outdent().run()" class="toolbar-btn min-h-6! min-w-6!" title="Decrease Indent"><Outdent class="w-3.5 h-3.5" /></button>
+        <button @click="editor?.chain().focus().indent().run()" class="toolbar-btn min-h-6! min-w-6!" title="Increase Indent"><IndentIcon class="w-3.5 h-3.5" /></button>
 
         <!-- Table Controls (Visible only when in a table) -->
         <div v-if="editor?.isActive('table')" class="flex items-center gap-1 bg-primary-50 dark:bg-primary-900/20 p-0.5 rounded-md border border-primary-200 dark:border-primary-800 ml-1">
-          <button @click="editor?.chain().focus().addRowAfter().run()" class="toolbar-btn text-primary-700 dark:text-primary-300 min-h-[20px]! px-1! py-0!" title="Add Row"><Plus class="w-2.5 h-2.5" /><ArrowDownToLine class="w-2.5 h-2.5 -ml-0.5" /></button>
-          <button @click="editor?.chain().focus().addColumnAfter().run()" class="toolbar-btn text-primary-700 dark:text-primary-300 min-h-[20px]! px-1! py-0!" title="Add Column"><Plus class="w-2.5 h-2.5" /><ArrowRightToLine class="w-2.5 h-2.5 -ml-0.5" /></button>
-          <button @click="editor?.chain().focus().deleteRow().run()" class="toolbar-btn text-red-600 dark:text-red-400 min-h-[20px]! px-1.5! py-0!" title="Delete Row"><Trash2 class="w-2.5 h-2.5" /></button>
-          <button @click="editor?.chain().focus().deleteTable().run()" class="toolbar-btn text-red-600 dark:text-red-400 min-h-[20px]! px-1! py-0!" title="Delete Table"><TableIcon class="w-2.5 h-2.5" /><Trash2 class="w-2 h-2 -ml-0.5" /></button>
+          <button @click="editor?.chain().focus().addRowAfter().run()" class="toolbar-btn text-primary-700 dark:text-primary-300 min-h-5! px-1! py-0!" title="Add Row"><Plus class="w-2.5 h-2.5" /><ArrowDownToLine class="w-2.5 h-2.5 -ml-0.5" /></button>
+          <button @click="editor?.chain().focus().addColumnAfter().run()" class="toolbar-btn text-primary-700 dark:text-primary-300 min-h-5! px-1! py-0!" title="Add Column"><Plus class="w-2.5 h-2.5" /><ArrowRightToLine class="w-2.5 h-2.5 -ml-0.5" /></button>
+          <button @click="editor?.chain().focus().deleteRow().run()" class="toolbar-btn text-red-600 dark:text-red-400 min-h-5! px-1.5! py-0!" title="Delete Row"><Trash2 class="w-2.5 h-2.5" /></button>
+          <button @click="editor?.chain().focus().deleteTable().run()" class="toolbar-btn text-red-600 dark:text-red-400 min-h-5! px-1! py-0!" title="Delete Table"><TableIcon class="w-2.5 h-2.5" /><Trash2 class="w-2 h-2 -ml-0.5" /></button>
         </div>
 
       </div>
@@ -837,8 +987,8 @@ const removeShadingColor = () => {
 
     <!-- Canvas Area -->
     <div ref="editorScrollContainer" class="flex-1 overflow-y-auto bg-surface-200 dark:bg-surface-950 p-4 sm:p-8 cursor-text" @click.self="editor?.chain().focus().run()">
-      <div :class="['mx-auto w-full max-w-[816px] min-h-[1056px] bg-white dark:bg-surface-900 shadow-md border border-surface-300 dark:border-surface-800 rounded-sm overflow-hidden transition-colors relative z-0', { 'show-formatting-marks': showFormattingMarks }]">
-        <editor-content :editor="editor" class="h-full min-h-[1056px] tiptap-page" />
+      <div :class="['mx-auto w-full max-w-204 min-h-264 bg-white dark:bg-surface-900 shadow-md border border-surface-300 dark:border-surface-800 rounded-sm overflow-hidden transition-colors relative z-0', { 'show-formatting-marks': showFormattingMarks }]">
+        <editor-content :editor="editor" class="h-full min-h-264 tiptap-page" />
       </div>
     </div>
     
@@ -865,7 +1015,7 @@ const removeShadingColor = () => {
 
 /* UI Elements */
 .toolbar-btn {
-  @apply p-1.5 rounded text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-800 hover:text-surface-900 dark:hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center min-w-[32px] min-h-[32px] text-sm;
+  @apply p-1.5 rounded text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-800 hover:text-surface-900 dark:hover:text-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center min-w-8 min-h-8 text-sm;
 }
 .toolbar-btn.is-active {
   @apply bg-primary-100 text-primary-700 dark:bg-primary-900 dark:text-primary-300;
@@ -882,7 +1032,7 @@ const removeShadingColor = () => {
 
 /* Page Layout ProseMirror Styles */
 .tiptap-page .ProseMirror {
-  @apply outline-none px-8 sm:px-16 py-12 sm:py-16 w-full h-full min-h-[1056px] text-base text-surface-900 dark:text-surface-50 cursor-text bg-transparent;
+  @apply outline-none px-8 sm:px-16 py-12 sm:py-16 w-full h-full min-h-264 text-base text-surface-900 dark:text-surface-50 cursor-text bg-transparent;
 }
 
 .tiptap-page .ProseMirror p.is-editor-empty:first-child::before {

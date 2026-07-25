@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useQuery, useMutation, convex } from '@writer/shared'
+import { useQuery, useMutation, convex, parseConvexError } from '@writer/shared'
 import { api } from '@convex/_generated/api'
 import { X, Trash2, Loader2, Image as ImageIcon, Plus } from '@lucide/vue'
 import { ref } from 'vue'
@@ -23,9 +23,9 @@ const handleDelete = async (imageId: string) => {
   isDeleting.value = imageId
   try {
     await removeImage({ id: imageId as any })
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Failed to delete image:', error)
-    alert(error.message || 'Failed to delete image.')
+    alert(parseConvexError(error, 'Failed to delete image.'))
   } finally {
     isDeleting.value = null
   }
